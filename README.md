@@ -101,12 +101,36 @@ bash visualize.sh
 
 ## Requirements
 
-- Python 3.8+
-- JAX with CUDA support
-- Flax
-- NumPy
-- Matplotlib
-- See `requirements.txt` for full dependencies
+- **Python**: 3.12.x (recommended) or 3.8+
+- **GPU**: NVIDIA GPU with CUDA 12.x support (required for training)
+- **OS**: Linux (tested), Windows/macOS may work
+- **Disk**: 10GB+ for code and checkpoints
+
+See [ENVIRONMENT.md](ENVIRONMENT.md) for detailed system requirements and troubleshooting.
+
+### Installation
+
+**Option 1: Full reproducibility (recommended)**
+```bash
+python3.12 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements_full.txt
+```
+Installs exact versions (82 packages, ~7GB with CUDA libraries) from development environment.
+
+**Option 2: Minimal install**
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+Installs only core dependencies with latest compatible versions (more flexible).
+
+**Verify installation:**
+```bash
+python -c "import jax; print('JAX devices:', jax.devices())"
+```
+Should show `[cuda(id=0)]` if GPU is available.
 
 ## Key Features
 
