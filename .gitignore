@@ -13,18 +13,19 @@ venv/
 env/
 ENV/
 
-# Experiments & Models (too large for GitHub)
-experiments/
-*.pkl
-*.pickle
-*.ckpt
+# Experiments & Models
+# Using Git LFS for large files
+experiments/aug_*/
+**/metrics.pickle
+**/metrics.pkl
+
+# Other model formats
 *.pth
 *.h5
 *.hdf5
 
-# Test Results (uploaded for reproducibility, ~62MB total)
-# test_results/  # ✅ Uncommented - uploading test results
-visualization_results/
+# Test Results and Visualizations  
+# (using Git LFS for .pkl files)
 visualization_figures/
 
 # Logs
