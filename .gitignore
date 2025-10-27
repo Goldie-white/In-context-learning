@@ -22,8 +22,8 @@ experiments/
 *.h5
 *.hdf5
 
-# Test Results (optional: comment out if you want to upload)
-test_results/
+# Test Results (uploaded for reproducibility, ~62MB total)
+# test_results/  # ✅ Uncommented - uploading test results
 visualization_results/
 visualization_figures/
 
