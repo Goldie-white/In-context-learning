@@ -1,0 +1,8 @@
+flax
+jax
+matplotlib
+tensorflow
+numpy
+absl-py
+optax
+pyyaml

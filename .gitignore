@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Experiments & Models (too large for GitHub)
+experiments/
+*.pkl
+*.pickle
+*.ckpt
+*.pth
+*.h5
+*.hdf5
+
+# Test Results (optional: comment out if you want to upload)
+test_results/
+visualization_results/
+visualization_figures/
+
+# Logs
+*.log
+nohup.out
+
+# System
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml
+.cursor/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data (optional: adjust as needed)
+data/
+datasets/
+*.npy
+*.npz
+
+# Temporary files
+tmp/
+temp/
+.cache/
+
