@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-上下文学习训练脚本 - 基于完整项目理解重写
-专注于Transformer模型的训练，不包含画图和复杂评估功能
+上下文学习训练脚本 - W预测版本
+预测权重向量w而不是直接预测y，然后通过y=w^Tx计算y值
 """
 
 import os
@@ -26,7 +26,7 @@ from tensorflow.io import gfile
 from incontext import utils
 from incontext import sampler_lib
 from incontext import transformer_lib_flax
-from incontext import predictor_flax
+from incontext import predictor_flax_w_loss_w  # ⭐ 改动1：导入w预测器（使用w loss版本）
 
 # 基础训练参数 (与原始项目model_trainer.py和main.py一致)
 flags.DEFINE_integer("seed", default=0, help="随机种子")
@@ -35,11 +35,11 @@ flags.DEFINE_integer("x_dim", default=20, help="输入维度")
 flags.DEFINE_integer("num_exemplars", default=None, help="示例数量（固定长度模式，设置此项则忽略min/max）")
 flags.DEFINE_integer("min_num_exemplars", default=20, help="最小示例数量（可变长度模式）")
 flags.DEFINE_integer("max_num_exemplars", default=50, help="最大示例数量（可变长度模式）")
-flags.DEFINE_integer("n_epochs", default=5000, help="训练轮数")  # 原始项目: 5000 epochs
+flags.DEFINE_integer("n_epochs", default=5000, help="训练轮数")  # 原始项目: 5001 epochs
 flags.DEFINE_integer("n_iter_per_epoch", default=100, help="每轮迭代次数")  # 原始项目: 100 iters, 总共~500K步
 flags.DEFINE_float("learning_rate", default=1e-4, help="学习率")  # 原始项目: 1e-4
 flags.DEFINE_float("weight_decay", default=0, help="权重衰减")  # 原始项目: 0
-flags.DEFINE_string("exp_folder", default="experiments/y_predictor", help="实验文件夹")
+flags.DEFINE_string("exp_folder", default="experiments/w_predictor", help="实验文件夹")  # ⭐ 改动2：独立文件夹避免混淆
 
 # 数据分布参数
 flags.DEFINE_string("x_distribution_str", default="normal*1.0+0.0", help="输入分布")
@@ -62,25 +62,19 @@ flags.DEFINE_float("adam_b1", default=0.9, help="Adam b1")
 flags.DEFINE_float("adam_b2", default=0.98, help="Adam b2")
 flags.DEFINE_float("adam_eps", default=1e-9, help="Adam eps")
 
-# 初始化参数 - 使用transformer_lib_flax中的定义
-# flags.DEFINE_string("kernel_init", default="uniform_scaling", help="核初始化")
-# flags.DEFINE_string("bias_init", default="uniform_scaling", help="偏置初始化")
-# flags.DEFINE_string("linear_w_init", default="uniform_scaling", help="线性层权重初始化")
-# flags.DEFINE_string("linear_bias_init", default="uniform_scaling", help="线性层偏置初始化")
-# flags.DEFINE_string("posemb_init", default="uniform_scaling", help="位置编码初始化")
-# flags.DEFINE_string("activation_fn", default="gelu", help="激活函数")
-
 FLAGS = flags.FLAGS
 
 
-def train_step(state, seq, model, learning_rate_fn, dropout_rng=None):
+def train_step(state, seq, task_ids, w_target, model, learning_rate_fn, dropout_rng=None):
     """执行单步训练"""
     dropout_rng = random.fold_in(dropout_rng, state.step)
 
     def loss_fn(params):
-        """训练损失函数"""
+        """训练损失函数 - 使用 w 的 MSE"""
         output = model.apply({"params": params},
                            inputs=seq,
+                           task_ids=task_ids,
+                           w_target=w_target,  # ⭐ 传入真实的w向量
                            train=True,
                            rngs={"dropout": dropout_rng})
         return output[0].mean(), output
@@ -91,8 +85,10 @@ def train_step(state, seq, model, learning_rate_fn, dropout_rng=None):
     grads = jax.lax.pmean(grads, "batch")
     new_state = state.apply_gradients(grads=grads)
     loss = jax.lax.pmean(extras[0], "batch")
+    # extras[1] = (y_errors, w_errors, y_pred, w_pred, seq_pred, seq_hiddens)
     y_errors = jax.lax.psum(extras[1][0], "batch").sum(axis=0)
-    metrics = {"loss": loss, "lr": lr, "y_errors": y_errors}
+    w_errors = jax.lax.psum(extras[1][1], "batch").sum(axis=0)
+    metrics = {"loss": loss, "lr": lr, "y_errors": y_errors, "w_errors": w_errors}
     return new_state, metrics
 
 
@@ -113,6 +109,7 @@ def get_model(rng, args):
         max_num_exemplars = args.max_num_exemplars
     
     logging.info(f"Transformer配置: L={n_layers}, H={hidden_size}, M={n_heads}")
+    logging.info(f"⭐ 使用W预测器: 输出维度={args.x_dim}")
     logging.info(f"⭐ 最大序列长度: {max_num_exemplars} exemplars")
 
     # 创建Transformer配置
@@ -136,7 +133,8 @@ def get_model(rng, args):
         activation_fn=transformer_lib_flax.nn_activation_parser(args.activation_fn),
     )
 
-    model = predictor_flax.CausalLM(config)
+    # ⭐ 改动3：使用CausalLM_W并传入x_dim（使用w loss版本）
+    model = predictor_flax_w_loss_w.CausalLM_W(config=config, x_dim=args.x_dim)
 
     @jax.jit
     def initialize_variables(init_rng):
@@ -174,8 +172,8 @@ def get_model(rng, args):
 
     # 创建训练状态
     state = train_state.TrainState.create(
-        apply_fn=model.apply, 
-        params=init_variables["params"], 
+        apply_fn=model.apply,
+        params=init_variables["params"],
         tx=opt
     )
 
@@ -184,7 +182,7 @@ def get_model(rng, args):
 
     # 创建并行训练步骤
     p_train_step = jax.pmap(
-        lambda state, seq, dropout_rng: train_step(state, seq, model, scheduler, dropout_rng),
+        lambda state, seq, task_ids, w_target, dropout_rng: train_step(state, seq, task_ids, w_target, model, scheduler, dropout_rng),
         axis_name="batch",
     )
 
@@ -192,33 +190,23 @@ def get_model(rng, args):
 
 
 def save_checkpoint(state, exp_folder):
-    """保存模型检查点"""
-    import numpy as np
-    
-    def get_array(x):
-        try:
-            return np.array(x)
-        except:
-            return None
-
-    state = jax.tree_util.tree_map(get_array, jax_utils.unreplicate(state))
+    """保存检查点"""
+    # unreplicate会自动处理，不需要额外的get_array
+    state = jax_utils.unreplicate(state)
     ckpt_dir = os.path.abspath(os.path.join(exp_folder, "ckpt/"))
     gfile.makedirs(ckpt_dir)
-    
-    try:
-        checkpoints.save_checkpoint(
-            ckpt_dir=ckpt_dir, 
-            target=state, 
-            step=state.step, 
-            overwrite=True
-        )
-        logging.info(f"模型检查点已保存到: {ckpt_dir}")
-    except Exception as e:
-        logging.warning(f"保存检查点时出现问题: {e}")
+    checkpoints.save_checkpoint(
+        ckpt_dir,
+        state,
+        step=int(state.step),
+        keep=3,
+        overwrite=True,
+    )
+    logging.info(f"保存检查点到: {ckpt_dir}")
 
 
 def train_model(args):
-    """训练模型的主函数"""
+    """主训练函数"""
     # 设置随机种子
     utils.set_seed(args.seed)
     rng = random.PRNGKey(args.seed)
@@ -245,8 +233,10 @@ def train_model(args):
 
     logging.info("开始训练...")
     logging.info("="*70)
-    logging.info("训练配置 (与原始项目model_trainer.py一致):")
+    logging.info("训练配置 (W预测版本 - 使用W MSE损失):")
     logging.info(f"  模型: L=16, H=512, M=4")
+    logging.info(f"  ⭐ 预测目标: w向量 (维度={args.x_dim})")
+    logging.info(f"  ⭐ 损失函数: MSE(w_pred, w_true) - 直接优化w的预测")
     logging.info(f"  训练: {args.n_epochs * args.n_iter_per_epoch} iterations ({args.n_epochs} epochs × {args.n_iter_per_epoch} iters)")
     logging.info(f"  数据: {length_info} (x,y)对, x_dim={args.x_dim}, batch={args.batch_size}")
     logging.info(f"  分布: p(w)=N(0,I), p(x)=N(0,I)")
@@ -299,8 +289,7 @@ def train_model(args):
     task_probs = [args.prob0, args.prob1, args.prob2, args.prob3]
     prob_sum = sum(task_probs)
     
-    # Check if using default values (all defaults would sum to 1.0)
-    # Allow small numerical tolerance for floating point comparison
+    # Check if probabilities sum to 1.0
     if abs(prob_sum - 1.0) > 1e-6:
         raise ValueError(
             f"任务概率之和必须等于1.0，当前为 {prob_sum}。\n"
@@ -309,6 +298,7 @@ def train_model(args):
         )
     
     logging.info(f"📝 任务概率设置: [Task1={args.prob0}, Task2={args.prob1}, Task3={args.prob2}, Task4={args.prob3}]")
+
     # 准备dropout随机数
     dropout_rngs = random.split(new_rng, jax.local_device_count())
     
@@ -320,7 +310,6 @@ def train_model(args):
 
     # 训练循环
     metrics_history = []
-    
     for epoch in range(start_epoch, args.n_epochs):
         epoch_metrics = []
         epoch_lengths = []  # 记录本epoch使用的所有长度
@@ -349,6 +338,8 @@ def train_model(args):
             
             # 采样数据
             seqs, coefficients, *_ = sampler.sample(n=args.batch_size)
+            # 获取任务类型
+            task_ids = sampler.get_last_task_ids()
             
             # 如果是可变长度，需要padding到最大长度
             if use_variable_length and current_length < max_len_for_padding:
@@ -358,29 +349,40 @@ def train_model(args):
                 padding = np.zeros((seqs.shape[0], pad_length, seqs.shape[2]))
                 seqs = np.concatenate([seqs, padding], axis=1)
             
+            # 转换为JAX数组并分片
             seqs = jnp.array(seqs)
-            coefficients = jnp.array(coefficients)
+            coefficients = jnp.array(coefficients)  # 真实的w向量
+            task_ids = jnp.array(task_ids, dtype=jnp.int32)
             seqs = common_utils.shard(seqs)
+            coefficients = common_utils.shard(coefficients)  # ⭐ 分片w向量
+            task_ids = common_utils.shard(task_ids)
             
             # 执行训练步骤
-            state, metrics = p_train_step(state, seqs, dropout_rng=dropout_rngs)
+            state, metrics = p_train_step(state, seqs, task_ids, coefficients, dropout_rng=dropout_rngs)
+            
+            # 收集指标
             metrics = jax.device_get(jax.tree_util.tree_map(lambda x: x[0], metrics))
+            # 如果是可变长度，记录该iteration的实际长度，用于后续正确统计
+            if use_variable_length:
+                metrics["actual_length"] = current_length
             epoch_metrics.append(metrics)
-            metrics_history.append(metrics)
-
-        # 计算并记录平均指标
+        
+        # Epoch结束，计算平均指标
         epoch_metrics = common_utils.stack_forest(epoch_metrics)
         avg_loss = jnp.mean(epoch_metrics["loss"])
         avg_lr = epoch_metrics["lr"][-1]
+        
         # 获取最后一个iteration的指标（用于显示实际长度和对应的loss）
-        # epoch_metrics经过stack_forest后，y_errors的shape是(num_iterations, num_positions)
+        # epoch_metrics经过stack_forest后，y_errors和w_errors的shape是(num_iterations, num_positions)
         last_y_errors = epoch_metrics["y_errors"][-1] / args.batch_size if epoch_metrics["y_errors"].shape[0] > 0 else jnp.array([])
+        last_w_errors = epoch_metrics["w_errors"][-1] / args.batch_size if epoch_metrics["w_errors"].shape[0] > 0 else jnp.array([])
         
         # 获取最后一个iteration的实际长度
         if use_variable_length and len(epoch_lengths) > 0:
             last_length = epoch_lengths[-1]
             # 只输出到实际长度，不包含padding部分
             last_y_errors = last_y_errors[:last_length]
+            last_w_errors = last_w_errors[:last_length]
             
             # 输出长度统计（整个epoch的统计）
             avg_length = np.mean(epoch_lengths)
@@ -394,21 +396,32 @@ def train_model(args):
             sorted_lengths = sorted(length_counts.items(), key=lambda x: x[1], reverse=True)[:10]
             length_str = ", ".join([f"{length}({count})" for length, count in sorted_lengths])
             logging.info(f"Epoch {epoch+1}/{args.n_epochs} - "
-                        f"Loss: {avg_loss:.6f}, "
+                        f"Loss (W MSE): {avg_loss:.6f}, "
                         f"LR: {avg_lr:.2e}")
             logging.info(f"  📏 序列长度统计: 平均={avg_length:.1f}±{std_length:.1f}, 范围=[{min_length}, {max_length}], 主要分布: {length_str}")
             logging.info(f"  📏 最后批次: 序列长度={last_length}")
         else:
             last_length = args.num_exemplars if args.num_exemplars is not None else max_len_for_padding
         logging.info(f"Epoch {epoch+1}/{args.n_epochs} - "
-                    f"Loss: {avg_loss:.6f}, "
+                    f"Loss (W MSE): {avg_loss:.6f}, "
                     f"LR: {avg_lr:.2e}")
         
         # 输出最后一个iteration的位置loss数组（简洁格式）
+        if len(last_w_errors) > 0:
+            if len(last_w_errors) <= 100:
+                w_loss_str = "[" + ", ".join([f"{float(last_w_errors[i]):.4f}" for i in range(len(last_w_errors))]) + "]"
+                logging.info(f"Position W Loss (MSE, 长度={last_length}): {w_loss_str}")
+            else:
+                logging.info(f"Position W Loss (MSE, 长度={last_length}): (序列太长，共{len(last_w_errors)}个位置，仅显示前10个和后10个)")
+                w_first = ", ".join([f"{float(last_w_errors[i]):.4f}" for i in range(10)])
+                w_last = ", ".join([f"{float(last_w_errors[i]):.4f}" for i in range(len(last_w_errors)-10, len(last_w_errors))])
+                logging.info(f"  前10: [{w_first}]")
+                logging.info(f"  后10: [{w_last}]")
+        
         if len(last_y_errors) > 0:
             if len(last_y_errors) <= 100:
-                loss_str = "[" + ", ".join([f"{float(last_y_errors[i]):.4f}" for i in range(len(last_y_errors))]) + "]"
-                logging.info(f"Position Y Loss (MSE, 长度={last_length}): {loss_str}")
+                y_loss_str = "[" + ", ".join([f"{float(last_y_errors[i]):.4f}" for i in range(len(last_y_errors))]) + "]"
+                logging.info(f"Position Y Loss (MSE, 长度={last_length}): {y_loss_str}")
             else:
                 logging.info(f"Position Y Loss (MSE, 长度={last_length}): (序列太长，共{len(last_y_errors)}个位置，仅显示前10个和后10个)")
                 y_first = ", ".join([f"{float(last_y_errors[i]):.4f}" for i in range(10)])
@@ -419,19 +432,23 @@ def train_model(args):
         # 定期保存检查点
         if (epoch + 1) % 100 == 0:
             save_checkpoint(state, args.exp_folder)
-
-    # 最终保存
+        
+        metrics_history.append(epoch_metrics)
+    
+    # 保存最终模型
     save_checkpoint(state, args.exp_folder)
     
     # 保存训练指标
     metrics_history = common_utils.stack_forest(metrics_history)
     metrics_history["y_errors"] = jnp.mean(metrics_history["y_errors"], axis=0) / args.batch_size
+    metrics_history["w_errors"] = jnp.mean(metrics_history["w_errors"], axis=0) / args.batch_size
     
     with gfile.GFile(os.path.join(args.exp_folder, "metrics.pickle"), "wb") as handle:
         pickle.dump(metrics_history, handle)
     
     logging.info("训练完成！")
-    logging.info(f"最终损失: {jnp.mean(metrics_history['loss'][-100:]):.6f}")
+    logging.info(f"最终W MSE损失: {jnp.mean(metrics_history['loss'][-100:]):.6f}")
+    logging.info(f"最终Y MSE损失: {jnp.mean(metrics_history['y_errors'][:, -1][-100:]):.6f}")
     
     return state, metrics_history
 
@@ -444,3 +461,4 @@ def main(_):
 
 if __name__ == "__main__":
     app.run(main)
+
